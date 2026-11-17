@@ -6,29 +6,33 @@ on:
       list_only:
         description: "Только показать defconfig и найти TR3000, без сборки"
         type: boolean
-        default: true
+        default: false
       defconfig:
         description: "Имя файла из defconfig/"
         type: string
         default: "mt7981-ax3000.config"
+      device:
+        description: "Профиль устройства"
+        type: choice
+        options:
+          - cudy_tr3000-v1
+          - cudy_tr3000-v1-ubootmod
+          - cudy_tr3000-v1-256mb
+        default: cudy_tr3000-v1
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Inspect repo
         run: |
           echo "=== defconfig/ ==="
           ls -1 defconfig/
-          echo "=== упоминания tr3000 ==="
-          grep -rIil tr3000 defconfig/ target/linux/mediatek/image/ target/linux/mediatek/dts/ || true
-          echo "=== профили в mt7981.mk ==="
-          grep -nE 'define Device/.*tr3000' target/linux/mediatek/image/*.mk || true
-          echo "=== TARGET-строки выбранного defconfig ==="
-          grep -nE 'CONFIG_TARGET_(mediatek|MULTI|ALL|DEVICE)' "defconfig/${{ inputs.defconfig }}" | head -50 || true
+          echo "=== профили TR3000 ==="
+          grep -nE 'define Device/.*tr3000' target/linux/mediatek/image/filogic.mk || true
 
       - name: Free disk space
         if: ${{ !inputs.list_only }}
@@ -51,21 +55,16 @@ jobs:
         run: |
           set -e
           cp "defconfig/${{ inputs.defconfig }}" .config
+          DEV="${{ inputs.device }}"
 
-          # имя профиля TR3000 из .mk (если их несколько, берём первый)
-          DEV=$(grep -hoE 'define Device/[A-Za-z0-9_.-]*tr3000[A-Za-z0-9_.-]*' target/linux/mediatek/image/*.mk | head -1 | sed 's#define Device/##')
-          [ -n "$DEV" ] || { echo "Профиль TR3000 не найден в target/linux/mediatek/image/*.mk"; exit 1; }
-          echo "Профиль: $DEV"
+          grep -q "^define Device/${DEV}\$" target/linux/mediatek/image/filogic.mk \
+            || { echo "Профиль $DEV не найден"; exit 1; }
 
-          # префикс символа берём из самого defconfig
-          PREFIX=$(grep -m1 -oE 'CONFIG_TARGET_DEVICE_[A-Za-z0-9_]+_DEVICE_' .config || true)
-          [ -n "$PREFIX" ] || { echo "В $INPUT нет строк CONFIG_TARGET_DEVICE_*, нужно выбрать профиль вручную"; exit 1; }
+          # убираем все устройства из defconfig, MULTI_PROFILE оставляем
+          sed -i -E '/^CONFIG_TARGET_DEVICE_/d' .config
+          echo "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${DEV}=y" >> .config
+          echo "CONFIG_TARGET_DEVICE_PACKAGES_mediatek_filogic_DEVICE_${DEV}=\"\"" >> .config
 
-          # оставляем только TR3000
-          sed -i -E '/^CONFIG_TARGET_DEVICE_/d;/^CONFIG_TARGET_ALL_PROFILES/d;/^CONFIG_TARGET_MULTI_PROFILE/d;/^CONFIG_TARGET_PER_DEVICE_ROOTFS/d' .config
-          echo "${PREFIX}${DEV}=y" >> .config
-
-          # нужные модули (вшиваем в прошивку)
           {
             echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y"
             echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y"
@@ -75,8 +74,11 @@ jobs:
 
           make defconfig
 
-          # проверки
-          grep -q "^${PREFIX}${DEV}=y" .config || { echo "Профиль не включился"; exit 1; }
+          echo "=== итоговые устройства ==="
+          grep -E '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y' .config
+
+          grep -q "^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_${DEV}=y" .config || { echo "Профиль не включился"; exit 1; }
+          [ "$(grep -cE '^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_.*=y' .config)" = "1" ] || { echo "Включено больше одного устройства"; exit 1; }
           grep -q '^CONFIG_PACKAGE_kmod-usb-net-rndis=y' .config || { echo "rndis не включился"; exit 1; }
           grep -q '^CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y' .config || { echo "cdc-ether не включился"; exit 1; }
 
@@ -97,3 +99,4 @@ jobs:
             bin/targets/
             .config
           retention-days: 30
+          
