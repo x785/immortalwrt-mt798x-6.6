@@ -4,9 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       list_only:
-        description: "Только показать defconfig и найти TR3000, без сборки"
+        description: "Только показать defconfig и профили, без сборки"
         type: boolean
         default: false
+      ref:
+        description: "Коммит для сборки (пусто = последний в ветке)"
+        type: string
+        default: "4c657c9354"
       defconfig:
         description: "Имя файла из defconfig/"
         type: string
@@ -26,6 +30,14 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout нужного коммита
+        if: ${{ inputs.ref != '' }}
+        run: |
+          git checkout "${{ inputs.ref }}"
+          git log -1 --format='%H %cd %s'
 
       - name: Inspect repo
         run: |
@@ -90,6 +102,17 @@ jobs:
         if: ${{ !inputs.list_only }}
         run: make -j$(nproc) || make -j1 V=s
 
+      - name: Check kernel dependency
+        if: ${{ !inputs.list_only && always() }}
+        run: |
+          cd bin/targets/mediatek/filogic/packages || exit 0
+          for f in kmod-usb-net-cdc-ether_*.ipk kmod-usb-net-cdc-ncm_*.ipk; do
+            echo "== $f"
+            tar -xOzf "$f" ./control.tar.gz | tar -xzO ./control | grep -E "^(Depends|Architecture)"
+          done
+          echo
+          echo "Нужно: kernel (= 6.6.95~9e1eecd385406f9a23903187ccf6347c-r1)"
+
       - name: Upload firmware
         if: ${{ !inputs.list_only }}
         uses: actions/upload-artifact@v4
@@ -99,4 +122,3 @@ jobs:
             bin/targets/
             .config
           retention-days: 30
-          
