@@ -1,0 +1,99 @@
+name: build-tr3000
+
+on:
+  workflow_dispatch:
+    inputs:
+      list_only:
+        description: "Только показать defconfig и найти TR3000, без сборки"
+        type: boolean
+        default: true
+      defconfig:
+        description: "Имя файла из defconfig/"
+        type: string
+        default: "mt7981-ax3000.config"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inspect repo
+        run: |
+          echo "=== defconfig/ ==="
+          ls -1 defconfig/
+          echo "=== упоминания tr3000 ==="
+          grep -rIil tr3000 defconfig/ target/linux/mediatek/image/ target/linux/mediatek/dts/ || true
+          echo "=== профили в mt7981.mk ==="
+          grep -nE 'define Device/.*tr3000' target/linux/mediatek/image/*.mk || true
+          echo "=== TARGET-строки выбранного defconfig ==="
+          grep -nE 'CONFIG_TARGET_(mediatek|MULTI|ALL|DEVICE)' "defconfig/${{ inputs.defconfig }}" | head -50 || true
+
+      - name: Free disk space
+        if: ${{ !inputs.list_only }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build environment
+        if: ${{ !inputs.list_only }}
+        run: sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+
+      - name: Feeds
+        if: ${{ !inputs.list_only }}
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Prepare .config
+        if: ${{ !inputs.list_only }}
+        run: |
+          set -e
+          cp "defconfig/${{ inputs.defconfig }}" .config
+
+          # имя профиля TR3000 из .mk (если их несколько, берём первый)
+          DEV=$(grep -hoE 'define Device/[A-Za-z0-9_.-]*tr3000[A-Za-z0-9_.-]*' target/linux/mediatek/image/*.mk | head -1 | sed 's#define Device/##')
+          [ -n "$DEV" ] || { echo "Профиль TR3000 не найден в target/linux/mediatek/image/*.mk"; exit 1; }
+          echo "Профиль: $DEV"
+
+          # префикс символа берём из самого defconfig
+          PREFIX=$(grep -m1 -oE 'CONFIG_TARGET_DEVICE_[A-Za-z0-9_]+_DEVICE_' .config || true)
+          [ -n "$PREFIX" ] || { echo "В $INPUT нет строк CONFIG_TARGET_DEVICE_*, нужно выбрать профиль вручную"; exit 1; }
+
+          # оставляем только TR3000
+          sed -i -E '/^CONFIG_TARGET_DEVICE_/d;/^CONFIG_TARGET_ALL_PROFILES/d;/^CONFIG_TARGET_MULTI_PROFILE/d;/^CONFIG_TARGET_PER_DEVICE_ROOTFS/d' .config
+          echo "${PREFIX}${DEV}=y" >> .config
+
+          # нужные модули (вшиваем в прошивку)
+          {
+            echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y"
+            echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y"
+            echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ncm=y"
+            echo "CONFIG_PACKAGE_usb-modeswitch=y"
+          } >> .config
+
+          make defconfig
+
+          # проверки
+          grep -q "^${PREFIX}${DEV}=y" .config || { echo "Профиль не включился"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_kmod-usb-net-rndis=y' .config || { echo "rndis не включился"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y' .config || { echo "cdc-ether не включился"; exit 1; }
+
+      - name: Download sources
+        if: ${{ !inputs.list_only }}
+        run: make -j$(nproc) download
+
+      - name: Build
+        if: ${{ !inputs.list_only }}
+        run: make -j$(nproc) || make -j1 V=s
+
+      - name: Upload firmware
+        if: ${{ !inputs.list_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: tr3000-firmware
+          path: |
+            bin/targets/
+            .config
+          retention-days: 30
